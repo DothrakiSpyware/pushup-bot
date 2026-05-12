@@ -5,3 +5,4 @@ apscheduler
 requests
 gunicorn
 pytz
+cloudinary
