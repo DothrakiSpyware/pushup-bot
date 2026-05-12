@@ -114,13 +114,16 @@ def save_log(phone, reps):
 
 def send_image_to_group(image_path):
     client = Client(ACCOUNT_SID, AUTH_TOKEN)
-    image_url = f"{PUBLIC_URL}/recap-image/{os.path.basename(image_path)}"
+    filename = os.path.basename(image_path)
+    image_url = f"{PUBLIC_URL}/recap-image/{filename}"
+    
     for number in GROUP_NUMBERS:
         number = number.strip()
         if number:
             client.messages.create(
                 from_=TWILIO_NUMBER,
                 to=number,
+                body="",
                 media_url=[image_url]
             )
 
