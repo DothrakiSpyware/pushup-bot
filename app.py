@@ -2,7 +2,7 @@ import os
 import re
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from flask import Flask, request
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
@@ -17,7 +17,8 @@ AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 GROUP_NUMBERS = os.environ.get("GROUP_NUMBERS", "").split(",")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
-TIMEZONE = os.environ.get("TIMEZONE", "America/New_York")
+TIMEZONE = "America/New_York"
+CHALLENGE_START = date(2025, 5, 1)
 
 DB_PATH = "pushups.db"
 
@@ -77,13 +78,23 @@ def parse_reps(body):
                 return val
     return None
 
-def get_today_str():
+def is_test_command(body):
+    body = body.strip().lower()
+    if re.match(r'^display\s+daily\s+report$', body):
+        return "daily"
+    if re.match(r'^display\s+weekly\s+report$', body):
+        return "weekly"
+    return None
+
+def get_date_str(target_date=None):
     tz = pytz.timezone(TIMEZONE)
-    return datetime.now(tz).strftime("%Y-%m-%d")
+    if target_date is None:
+        target_date = datetime.now(tz).date()
+    return target_date.strftime("%Y-%m-%d")
 
 def already_logged_today(phone):
     conn = get_db()
-    today = get_today_str()
+    today = get_date_str()
     row = conn.execute(
         "SELECT id FROM logs WHERE phone=? AND date=?", (phone, today)
     ).fetchone()
@@ -96,7 +107,7 @@ def save_log(phone, reps):
     now = datetime.now(tz)
     conn.execute(
         "INSERT INTO logs (phone, reps, logged_at, date) VALUES (?, ?, ?, ?)",
-        (phone, reps, now.isoformat(), get_today_str())
+        (phone, reps, now.isoformat(), get_date_str())
     )
     conn.commit()
     conn.close()
@@ -127,31 +138,30 @@ def sms_reply():
     if from_number not in people:
         return "", 204
 
-    reps = parse_reps(body)
+    test_type = is_test_command(body)
+    if test_type == "daily":
+        run_daily_recap(is_test=True)
+        return "", 204
+    if test_type == "weekly":
+        run_weekly_recap(is_test=True)
+        return "", 204
 
+    reps = parse_reps(body)
     if reps is None:
         return "", 204
 
     if already_logged_today(from_number):
-        conn = get_db()
-        today = get_today_str()
-        row = conn.execute(
-            "SELECT reps FROM logs WHERE phone=? AND date=? ORDER BY id DESC LIMIT 1",
-            (from_number, today)
-        ).fetchone()
-        conn.close()
         return "", 204
 
     save_log(from_number, reps)
     return "", 204
 
-def get_todays_entries():
+def get_entries_for_date(target_date_str):
     conn = get_db()
-    today = get_today_str()
     tz = pytz.timezone(TIMEZONE)
     rows = conn.execute(
         "SELECT phone, reps, logged_at FROM logs WHERE date=? ORDER BY reps DESC",
-        (today,)
+        (target_date_str,)
     ).fetchall()
     conn.close()
     entries = []
@@ -164,45 +174,59 @@ def get_todays_entries():
         })
     return entries
 
-def send_daily_recap():
+def run_daily_recap(is_test=False):
     os.makedirs("recap_images", exist_ok=True)
     people = load_people()
-    entries = get_todays_entries()
-
-    if not entries:
-        return
-
     tz = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
-    date_str = now.strftime("%A, %B %-d")
 
-    from datetime import date
-    challenge_start = date(2025, 5, 1)
-    day_num = (date.today() - challenge_start).days + 1
+    if is_test:
+        target_date = now.date()
+        target_date_str = get_date_str(target_date)
+        date_str = now.strftime("%A, %B %-d") + " (test)"
+    else:
+        target_date = (now - timedelta(days=1)).date()
+        target_date_str = get_date_str(target_date)
+        date_str = target_date.strftime("%A, %B %-d")
 
-    filename = f"daily_{get_today_str()}.png"
+    entries = get_entries_for_date(target_date_str)
+
+    if not entries and not is_test:
+        return
+
+    day_num = (target_date - CHALLENGE_START).days + 1
+
+    filename = f"daily_{target_date_str}{'_test' if is_test else ''}.png"
     path = os.path.join("recap_images", filename)
     generate_daily_image(date_str, day_num, entries, people, path)
     send_image_to_group(path)
 
-def send_weekly_recap():
+def run_weekly_recap(is_test=False):
     os.makedirs("recap_images", exist_ok=True)
     people = load_people()
-    conn = get_db()
     tz = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
-    week_start = (now - timedelta(days=6)).strftime("%Y-%m-%d")
-    today = get_today_str()
 
+    week_end = now.date()
+    week_start = week_end - timedelta(days=6)
+    week_start_str = get_date_str(week_start)
+    week_end_str = get_date_str(week_end)
+
+    conn = get_db()
     rows = conn.execute(
         "SELECT phone, reps, date FROM logs WHERE date >= ? AND date <= ?",
-        (week_start, today)
+        (week_start_str, week_end_str)
     ).fetchall()
     conn.close()
 
     weekly_data = {}
     for phone in people:
-        weekly_data[phone] = {"total_pts": 0, "total_reps": 0, "days_logged": 0, "best_day": 0}
+        weekly_data[phone] = {
+            "total_pts": 0,
+            "total_reps": 0,
+            "days_logged": 0,
+            "best_day": 0
+        }
 
     for row in rows:
         phone = row["phone"]
@@ -216,18 +240,18 @@ def send_weekly_recap():
         if reps > weekly_data[phone]["best_day"]:
             weekly_data[phone]["best_day"] = reps
 
-    from datetime import date
-    week_num = ((date.today() - date(2025, 5, 1)).days // 7) + 1
-    date_range = f"{(now - timedelta(days=6)).strftime('%b %-d')} – {now.strftime('%b %-d')}"
+    week_num = ((week_end - CHALLENGE_START).days // 7) + 1
+    date_range = f"{week_start.strftime('%b %-d')} – {week_end.strftime('%b %-d')}"
+    suffix = " (test)" if is_test else ""
 
-    filename = f"weekly_{today}.png"
+    filename = f"weekly_{week_end_str}{'_test' if is_test else ''}.png"
     path = os.path.join("recap_images", filename)
-    generate_weekly_image(week_num, date_range, weekly_data, people, path)
+    generate_weekly_image(week_num, date_range + suffix, weekly_data, people, path)
     send_image_to_group(path)
 
 scheduler = BackgroundScheduler(timezone=TIMEZONE)
-scheduler.add_job(send_daily_recap, "cron", hour=22, minute=0)
-scheduler.add_job(send_weekly_recap, "cron", day_of_week="sun", hour=21, minute=0)
+scheduler.add_job(run_daily_recap, "cron", hour=9, minute=0)
+scheduler.add_job(run_weekly_recap, "cron", day_of_week="mon", hour=9, minute=0)
 scheduler.start()
 
 init_db()
