@@ -1,0 +1,6 @@
+flask
+twilio
+pillow
+apscheduler
+requests
+gunicorn
