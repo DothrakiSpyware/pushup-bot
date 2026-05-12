@@ -113,19 +113,36 @@ def save_log(phone, reps):
     conn.close()
 
 def send_image_to_group(image_path):
+    import cloudinary
+    import cloudinary.uploader
+    
+    cloudinary.config(cloudinary_url=os.environ.get("CLOUDINARY_URL"))
+    
+    upload_result = cloudinary.uploader.upload(
+        image_path,
+        resource_type="image",
+        format="png"
+    )
+    
+    image_url = upload_result["secure_url"]
+    print(f"Image uploaded to: {image_url}")
+    
     client = Client(ACCOUNT_SID, AUTH_TOKEN)
-    filename = os.path.basename(image_path)
-    image_url = f"{PUBLIC_URL}/recap-image/{filename}"
     
     for number in GROUP_NUMBERS:
         number = number.strip()
-        if number:
-            client.messages.create(
+        if not number:
+            continue
+        try:
+            msg = client.messages.create(
                 from_=TWILIO_NUMBER,
                 to=number,
                 body="",
                 media_url=[image_url]
             )
+            print(f"Sent to {number}: {msg.sid}")
+        except Exception as e:
+            print(f"Failed to send to {number}: {e}")
 
 @app.route("/recap-image/<filename>")
 def serve_image(filename):
