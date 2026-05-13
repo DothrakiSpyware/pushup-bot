@@ -20,7 +20,7 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
 TIMEZONE = "America/New_York"
 CHALLENGE_START = date(2025, 5, 1)
 
-DB_PATH = "pushups.db"
+DB_PATH = "/data/pushups.db"
 
 def load_people():
     with open("people.json") as f:
@@ -274,6 +274,7 @@ scheduler.add_job(run_daily_recap, "cron", hour=9, minute=0)
 scheduler.add_job(run_weekly_recap, "cron", day_of_week="mon", hour=9, minute=0)
 scheduler.start()
 
+os.makedirs("/data", exist_ok=True)
 init_db()
 
 if __name__ == "__main__":
