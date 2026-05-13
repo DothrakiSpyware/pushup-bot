@@ -28,12 +28,15 @@ def load_font(size, bold=False):
         return ImageFont.load_default()
 
 def score_from_reps(reps):
+    import math
     if reps <= 0:
         return 0
     elif reps <= 100:
         return reps
+    elif reps <= 150:
+        return math.floor(100 + (reps - 100) * 0.5)
     elif reps <= 200:
-        return 100 + int((reps - 100) * 0.5)
+        return math.floor(125 + (reps - 150) * 0.25)
     else:
         return 150
 
@@ -151,10 +154,8 @@ def generate_daily_image(date_str, day_num, entries, people, output_path):
         draw_bar(draw, bar_x, bar_y, bar_w, 5, pct, rank_color)
 
         pts = score_from_reps(entry["reps"])
-        pts_str = str(pts)
-        draw.text((CARD_W - 160, y + row_h//2 - 14), pts_str, font=f_pts, fill=TEXT_PRIMARY, anchor="rm")
-        draw.text((CARD_W - 155, y + row_h//2 - 14), "pts", font=f_pts_label, fill=TEXT_MUTED, anchor="lm")
-        draw.text((CARD_W - 160, y + row_h//2 + 18), f"{entry['reps']} reps", font=f_meta, fill=TEXT_MUTED, anchor="rm")
+        draw.text((CARD_W - 30, y + row_h//2 - 14), str(entry["reps"]), font=f_pts, fill=TEXT_PRIMARY, anchor="rm")
+        draw.text((CARD_W - 30, y + row_h//2 + 18), f"{pts} pts", font=f_meta, fill=TEXT_MUTED, anchor="rm")
 
     for j, phone in enumerate(skipped):
         i = len(sorted_entries) + j
@@ -279,9 +280,8 @@ def generate_weekly_image(week_num, date_range_str, weekly_data, people, output_
 
         pts = data["total_pts"]
         total_reps = data.get("total_reps", 0)
-        draw.text((CARD_W - 160, y + row_h//2 - 14), str(pts), font=f_pts, fill=TEXT_PRIMARY, anchor="rm")
-        draw.text((CARD_W - 155, y + row_h//2 - 14), "pts", font=f_pts_label, fill=TEXT_MUTED, anchor="lm")
-        draw.text((CARD_W - 160, y + row_h//2 + 18), f"{total_reps} reps total", font=f_meta, fill=TEXT_MUTED, anchor="rm")
+        draw.text((CARD_W - 30, y + row_h//2 - 14), str(total_reps), font=f_pts, fill=TEXT_PRIMARY, anchor="rm")
+        draw.text((CARD_W - 30, y + row_h//2 + 18), f"{pts} pts", font=f_meta, fill=TEXT_MUTED, anchor="rm")
 
     fy = header_h + rows * row_h
     draw.rectangle([0, fy, CARD_W, fy + footer_h], fill=(8, 12, 20))
