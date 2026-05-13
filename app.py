@@ -7,15 +7,19 @@ from flask import Flask, request
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 from apscheduler.schedulers.background import BackgroundScheduler
-from image_generator import generate_daily_image, generate_weekly_image, score_from_reps
+from image_generator import generate_daily_recap, generate_weekly_recap, calculate_points
 import pytz
+
+os.makedirs("/data", exist_ok=True)
 
 app = Flask(__name__)
 
 ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
-GROUP_NUMBERS = os.environ.get("GROUP_NUMBERS", "").split(",")
+MESSAGING_SERVICE_SID = os.environ.get("TWILIO_MESSAGING_SERVICE_SID")
+ADMIN_NUMBER = os.environ.get("ADMIN_NUMBER", "")
+GROUP_NUMBERS = [n.strip() for n in os.environ.get("GROUP_NUMBERS", "").split(",") if n.strip()]
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
 TIMEZONE = "America/New_York"
 CHALLENGE_START = date(2025, 5, 1)
@@ -128,32 +132,131 @@ def send_image_to_group(image_path):
     print(f"Image uploaded to: {image_url}")
     
     client = Client(ACCOUNT_SID, AUTH_TOKEN)
-    
-    for number in GROUP_NUMBERS:
-        number = number.strip()
-        if not number:
-            continue
-        try:
-            msg = client.messages.create(
-                from_=TWILIO_NUMBER,
-                to=number,
-                body="",
-                media_url=[image_url]
-            )
-            print(f"Sent to {number}: {msg.sid}")
-        except Exception as e:
-            print(f"Failed to send to {number}: {e}")
+
+    recipients = [n for n in GROUP_NUMBERS if n and n != TWILIO_NUMBER]
+    if not recipients:
+        print("No group recipients configured")
+        return
+
+    send_kwargs = {
+        "to": recipients,
+        "body": "",
+        "media_url": [image_url],
+    }
+    if MESSAGING_SERVICE_SID:
+        send_kwargs["messaging_service_sid"] = MESSAGING_SERVICE_SID
+    else:
+        send_kwargs["from_"] = TWILIO_NUMBER
+
+    try:
+        msg = client.messages.create(**send_kwargs)
+        print(f"Group MMS sent to {recipients}: {getattr(msg, 'sid', '?')}")
+    except Exception as e:
+        print(f"Group MMS send failed ({e}); falling back to per-recipient send")
+        for number in recipients:
+            try:
+                per = {
+                    "to": number,
+                    "body": "",
+                    "media_url": [image_url],
+                }
+                if MESSAGING_SERVICE_SID:
+                    per["messaging_service_sid"] = MESSAGING_SERVICE_SID
+                else:
+                    per["from_"] = TWILIO_NUMBER
+                msg = client.messages.create(**per)
+                print(f"Sent to {number}: {msg.sid}")
+            except Exception as e2:
+                print(f"Failed to send to {number}: {e2}")
 
 @app.route("/recap-image/<filename>")
 def serve_image(filename):
     from flask import send_from_directory
     return send_from_directory("recap_images", filename)
 
+def send_admin_sms(message):
+    if not ADMIN_NUMBER:
+        return
+    try:
+        client = Client(ACCOUNT_SID, AUTH_TOKEN)
+        kwargs = {"to": ADMIN_NUMBER, "body": message}
+        if MESSAGING_SERVICE_SID:
+            kwargs["messaging_service_sid"] = MESSAGING_SERVICE_SID
+        else:
+            kwargs["from_"] = TWILIO_NUMBER
+        client.messages.create(**kwargs)
+    except Exception as e:
+        print(f"Failed admin SMS: {e}")
+
+
+def handle_admin_correct(body):
+    parts = body.strip().split()
+    # ["admin", "correct", first_name, reps, optional_date]
+    if len(parts) < 4:
+        send_admin_sms("Usage: admin correct <first_name> <reps> [MMDD]")
+        return
+    first_name = parts[2].lower()
+    try:
+        reps = int(parts[3])
+    except ValueError:
+        send_admin_sms(f"Invalid reps: {parts[3]}")
+        return
+
+    tz = pytz.timezone(TIMEZONE)
+    target_date = datetime.now(tz).date()
+    if len(parts) >= 5:
+        d = parts[4]
+        if len(d) != 4 or not d.isdigit():
+            send_admin_sms(f"Invalid date '{d}' (expected MMDD)")
+            return
+        try:
+            target_date = date(target_date.year, int(d[:2]), int(d[2:]))
+        except ValueError:
+            send_admin_sms(f"Invalid date '{d}'")
+            return
+
+    people = load_people()
+    match_phone = None
+    match_name = None
+    for phone, p in people.items():
+        if p.get("name", "").split()[0].lower() == first_name:
+            match_phone = phone
+            match_name = p.get("name")
+            break
+    if not match_phone:
+        send_admin_sms(f"No person found with first name '{first_name}'")
+        return
+
+    target_date_str = target_date.strftime("%Y-%m-%d")
+    conn = get_db()
+    existing = conn.execute(
+        "SELECT id FROM logs WHERE phone=? AND date=?", (match_phone, target_date_str)
+    ).fetchone()
+    now_iso = datetime.now(pytz.timezone(TIMEZONE)).isoformat()
+    if existing:
+        conn.execute(
+            "UPDATE logs SET reps=?, logged_at=? WHERE id=?",
+            (reps, now_iso, existing["id"]),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO logs (phone, reps, logged_at, date) VALUES (?, ?, ?, ?)",
+            (match_phone, reps, now_iso, target_date_str),
+        )
+    conn.commit()
+    conn.close()
+    send_admin_sms(f"Updated {match_name} to {reps} reps for {target_date_str}")
+
+
 @app.route("/sms", methods=["POST"])
 def sms_reply():
     from_number = request.form.get("From", "")
     body = request.form.get("Body", "")
     people = load_people()
+
+    if ADMIN_NUMBER and from_number == ADMIN_NUMBER and body.strip().lower().startswith("admin correct"):
+        handle_admin_correct(body)
+        return "", 204
 
     if from_number not in people:
         return "", 204
@@ -194,6 +297,12 @@ def get_entries_for_date(target_date_str):
         })
     return entries
 
+def people_list(people):
+    """Convert people dict to ordered list of {name, phone, photo} preserving insertion order."""
+    return [{"name": p.get("name", ""), "phone": phone, "photo": p.get("photo", "")}
+            for phone, p in people.items()]
+
+
 def run_daily_recap(is_test=False):
     os.makedirs("recap_images", exist_ok=True)
     people = load_people()
@@ -202,12 +311,9 @@ def run_daily_recap(is_test=False):
 
     if is_test:
         target_date = now.date()
-        target_date_str = get_date_str(target_date)
-        date_str = now.strftime("%A, %B %-d") + " (test)"
     else:
         target_date = (now - timedelta(days=1)).date()
-        target_date_str = get_date_str(target_date)
-        date_str = target_date.strftime("%A, %B %-d")
+    target_date_str = get_date_str(target_date)
 
     entries = get_entries_for_date(target_date_str)
 
@@ -216,10 +322,19 @@ def run_daily_recap(is_test=False):
 
     day_num = (target_date - CHALLENGE_START).days + 1
 
+    plist = people_list(people)
+    daily_logs = {}
+    for entry in entries:
+        person = people.get(entry["phone"])
+        if person:
+            daily_logs[person["name"]] = entry["reps"]
+
+    img = generate_daily_recap(plist, daily_logs, target_date, day_num)
     filename = f"daily_{target_date_str}{'_test' if is_test else ''}.png"
     path = os.path.join("recap_images", filename)
-    generate_daily_image(date_str, day_num, entries, people, path)
+    img.save(path)
     send_image_to_group(path)
+
 
 def run_weekly_recap(is_test=False):
     os.makedirs("recap_images", exist_ok=True)
@@ -239,34 +354,31 @@ def run_weekly_recap(is_test=False):
     ).fetchall()
     conn.close()
 
-    weekly_data = {}
+    weekly_by_phone = {}
     for phone in people:
-        weekly_data[phone] = {
-            "total_pts": 0,
-            "total_reps": 0,
-            "days_logged": 0,
-            "best_day": 0
-        }
+        weekly_by_phone[phone] = {"reps": 0, "days": 0, "points": 0}
 
     for row in rows:
         phone = row["phone"]
-        if phone not in weekly_data:
+        if phone not in weekly_by_phone:
             continue
         reps = row["reps"]
-        pts = score_from_reps(reps)
-        weekly_data[phone]["total_pts"] += pts
-        weekly_data[phone]["total_reps"] += reps
-        weekly_data[phone]["days_logged"] += 1
-        if reps > weekly_data[phone]["best_day"]:
-            weekly_data[phone]["best_day"] = reps
+        weekly_by_phone[phone]["reps"] += reps
+        weekly_by_phone[phone]["days"] += 1
+        weekly_by_phone[phone]["points"] += calculate_points(reps)
+
+    plist = people_list(people)
+    weekly_logs = {}
+    for phone, data in weekly_by_phone.items():
+        name = people[phone].get("name", "")
+        weekly_logs[name] = data
 
     week_num = ((week_end - CHALLENGE_START).days // 7) + 1
-    date_range = f"{week_start.strftime('%b %-d')} – {week_end.strftime('%b %-d')}"
-    suffix = " (test)" if is_test else ""
 
+    img = generate_weekly_recap(plist, weekly_logs, week_num, week_start, week_end)
     filename = f"weekly_{week_end_str}{'_test' if is_test else ''}.png"
     path = os.path.join("recap_images", filename)
-    generate_weekly_image(week_num, date_range + suffix, weekly_data, people, path)
+    img.save(path)
     send_image_to_group(path)
 
 scheduler = BackgroundScheduler(timezone=TIMEZONE)
