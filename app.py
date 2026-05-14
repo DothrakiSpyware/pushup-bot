@@ -83,8 +83,24 @@ def get_db():
     return conn
 
 
+REQUIRED_COLUMNS = {"id", "phone", "name", "date", "reps", "timestamp"}
+
+
 def init_db():
     conn = get_db()
+
+    # Startup migration: if the logs table exists but is missing any required
+    # column, drop it and recreate from scratch so deploys always land on the
+    # correct schema without manual intervention.
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='logs'"
+    ).fetchone()
+    if table_exists:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(logs)")}
+        if not REQUIRED_COLUMNS.issubset(columns):
+            print("logs table missing required columns; dropping and recreating")
+            conn.execute("DROP TABLE logs")
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS logs (
