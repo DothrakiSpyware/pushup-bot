@@ -1,0 +1,13 @@
+# Members
+# Format: First Last | +1XXXXXXXXXX
+# Add new members by adding a line below
+
+# Moderators (receive weekly report + can trigger on-demand reports)
+# Format: First Last | +1XXXXXXXXXX
+
+[MEMBERS]
+Your Name | +19143238594
+
+[MODERATORS]
+Your Name | +19143238594
+Other Mod | +18454615954

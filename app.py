@@ -1,393 +1,314 @@
 import os
 import re
-import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta, date
+
+import pytz
+import cloudinary
+import cloudinary.uploader
 from flask import Flask, request
 from twilio.rest import Client
-from twilio.twiml.messaging_response import MessagingResponse
 from apscheduler.schedulers.background import BackgroundScheduler
-from image_generator import generate_daily_recap, generate_weekly_recap, calculate_points
-import pytz
 
-os.makedirs("/data", exist_ok=True)
+from image_generator import generate_daily_recap, generate_weekly_recap, calculate_points
 
 app = Flask(__name__)
 
 ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
-MESSAGING_SERVICE_SID = os.environ.get("TWILIO_MESSAGING_SERVICE_SID")
-ADMIN_NUMBER = os.environ.get("ADMIN_NUMBER", "")
-GROUP_NUMBERS = [n.strip() for n in os.environ.get("GROUP_NUMBERS", "").split(",") if n.strip()]
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
-TIMEZONE = "America/New_York"
+CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
+
+EASTERN = pytz.timezone("America/New_York")
 CHALLENGE_START = date(2025, 5, 1)
 
 DB_PATH = "/data/pushups.db"
+PEOPLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "people.txt")
+
+os.makedirs("/data", exist_ok=True)
+
+
+# --------------------------------------------------------------------------
+# People
+# --------------------------------------------------------------------------
+def normalize_phone(phone):
+    return re.sub(r"[^\d+]", "", phone or "")
+
 
 def load_people():
-    with open("people.json") as f:
-        return json.load(f)
+    """Parse people.txt into (members, moderators).
 
+    Each list holds dicts: {"name": str, "phone": str}. Lines starting with #
+    are comments and blank lines are ignored. A person may appear in both
+    sections. Re-read on every call so file edits take effect without a
+    redeploy.
+    """
+    members, moderators = [], []
+    section = None
+    try:
+        with open(PEOPLE_FILE) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                upper = line.upper()
+                if upper == "[MEMBERS]":
+                    section = "members"
+                    continue
+                if upper == "[MODERATORS]":
+                    section = "moderators"
+                    continue
+                if "|" not in line or section is None:
+                    continue
+                name, phone = line.split("|", 1)
+                entry = {"name": name.strip(), "phone": normalize_phone(phone)}
+                if not entry["name"] or not entry["phone"]:
+                    continue
+                if section == "members":
+                    members.append(entry)
+                else:
+                    moderators.append(entry)
+    except FileNotFoundError:
+        print(f"people.txt not found at {PEOPLE_FILE}")
+    return members, moderators
+
+
+# --------------------------------------------------------------------------
+# Database
+# --------------------------------------------------------------------------
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
+
 def init_db():
     conn = get_db()
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             phone TEXT NOT NULL,
+            name TEXT NOT NULL,
+            date TEXT NOT NULL,
             reps INTEGER NOT NULL,
-            logged_at TEXT NOT NULL,
-            date TEXT NOT NULL
+            timestamp TEXT NOT NULL,
+            UNIQUE(phone, date)
         )
-    """)
+        """
+    )
     conn.commit()
     conn.close()
 
-def parse_reps(body):
-    body = body.strip()
-    patterns = [
-        r'^\s*(\d+)\s*$',
-        r'(\d+)\s*push\s*ups?',
-        r'(\d+)\s*push\s*ups?\s*done',
-        r'just\s*did\s*(\d+)',
-        r'did\s*(\d+)',
-        r'done\s*(\d+)',
-        r'(\d+)\s*done',
-        r'(\d+)\s*reps?',
-        r'(\d+)\s*today',
-        r'today\s*(\d+)',
-        r'(\d+)\s*complete',
-        r'complete[d]?\s*(\d+)',
-        r'knocked\s*out\s*(\d+)',
-        r'finished\s*(\d+)',
-        r'(\d+)\s*finished',
-        r'got\s*(\d+)',
-        r'(\d+)\s*got\s*it',
-        r'logging\s*(\d+)',
-        r'log\s*(\d+)',
-        r'(\d+)\s*logged',
-        r'(\d+)\s*for\s*today',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, body, re.IGNORECASE)
-        if match:
-            val = int(match.group(1))
-            if 1 <= val <= 2000:
-                return val
-    return None
 
-def is_test_command(body):
-    body = body.strip().lower()
-    if re.match(r'^display\s+daily\s+report$', body):
-        return "daily"
-    if re.match(r'^display\s+weekly\s+report$', body):
-        return "weekly"
-    return None
-
-def get_date_str(target_date=None):
-    tz = pytz.timezone(TIMEZONE)
-    if target_date is None:
-        target_date = datetime.now(tz).date()
-    return target_date.strftime("%Y-%m-%d")
-
-def already_logged_today(phone):
+def upsert_log(phone, name, log_date, reps):
+    """One entry per person per day; texting again the same day overwrites."""
     conn = get_db()
-    today = get_date_str()
-    row = conn.execute(
-        "SELECT id FROM logs WHERE phone=? AND date=?", (phone, today)
-    ).fetchone()
-    conn.close()
-    return row is not None
-
-def save_log(phone, reps):
-    conn = get_db()
-    tz = pytz.timezone(TIMEZONE)
-    now = datetime.now(tz)
     conn.execute(
-        "INSERT INTO logs (phone, reps, logged_at, date) VALUES (?, ?, ?, ?)",
-        (phone, reps, now.isoformat(), get_date_str())
+        """
+        INSERT INTO logs (phone, name, date, reps, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(phone, date) DO UPDATE SET
+            reps = excluded.reps,
+            name = excluded.name,
+            timestamp = excluded.timestamp
+        """,
+        (phone, name, log_date.isoformat(), reps, now_eastern().isoformat()),
     )
     conn.commit()
     conn.close()
 
-def send_image_to_group(image_path):
-    import cloudinary
-    import cloudinary.uploader
-    
-    cloudinary.config(cloudinary_url=os.environ.get("CLOUDINARY_URL"))
-    
-    upload_result = cloudinary.uploader.upload(
-        image_path,
-        resource_type="image",
-        format="png"
-    )
-    
-    image_url = upload_result["secure_url"]
-    print(f"Image uploaded to: {image_url}")
-    
+
+def daily_logs_for(members, target_date):
+    by_phone = {m["phone"]: m["name"] for m in members}
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT phone, reps FROM logs WHERE date = ?", (target_date.isoformat(),)
+    ).fetchall()
+    conn.close()
+    logs = {}
+    for row in rows:
+        name = by_phone.get(normalize_phone(row["phone"]))
+        if name:
+            logs[name] = row["reps"]
+    return logs
+
+
+def weekly_logs_for(members, week_start, week_end):
+    by_phone = {m["phone"]: m["name"] for m in members}
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT phone, reps FROM logs WHERE date >= ? AND date <= ?",
+        (week_start.isoformat(), week_end.isoformat()),
+    ).fetchall()
+    conn.close()
+    logs = {}
+    for row in rows:
+        name = by_phone.get(normalize_phone(row["phone"]))
+        if not name:
+            continue
+        entry = logs.setdefault(name, {"reps": 0, "days": 0})
+        entry["reps"] += row["reps"]
+        entry["days"] += 1
+    return logs
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+def now_eastern():
+    return datetime.now(EASTERN)
+
+
+def extract_reps(body):
+    match = re.search(r"\d+", body)
+    return int(match.group()) if match else None
+
+
+# --------------------------------------------------------------------------
+# Report generation + delivery
+# --------------------------------------------------------------------------
+def send_mms_to_moderators(image_path, moderators):
+    cloudinary.config(cloudinary_url=CLOUDINARY_URL)
+    result = cloudinary.uploader.upload(image_path, resource_type="image", format="png")
+    image_url = result["secure_url"]
+    print(f"Uploaded recap image: {image_url}")
+
     client = Client(ACCOUNT_SID, AUTH_TOKEN)
+    for mod in moderators:
+        try:
+            msg = client.messages.create(
+                to=mod["phone"], from_=TWILIO_NUMBER, media_url=[image_url]
+            )
+            print(f"Sent recap to {mod['phone']}: {msg.sid}")
+        except Exception as e:
+            print(f"Failed to send recap to {mod['phone']}: {e}")
 
-    recipients = [n for n in GROUP_NUMBERS if n and n != TWILIO_NUMBER]
-    if not recipients:
-        print("No group recipients configured")
-        return
 
-    send_kwargs = {
-        "to": recipients,
-        "body": "",
-        "media_url": [image_url],
-    }
-    if MESSAGING_SERVICE_SID:
-        send_kwargs["messaging_service_sid"] = MESSAGING_SERVICE_SID
-    else:
-        send_kwargs["from_"] = TWILIO_NUMBER
-
+def send_daily_report():
     try:
-        msg = client.messages.create(**send_kwargs)
-        print(f"Group MMS sent to {recipients}: {getattr(msg, 'sid', '?')}")
+        members, moderators = load_people()
+        if not moderators:
+            print("No moderators configured; skipping daily report")
+            return
+        target_date = now_eastern().date()
+        day_number = (target_date - CHALLENGE_START).days + 1
+        logs = daily_logs_for(members, target_date)
+        img = generate_daily_recap(members, logs, target_date, day_number)
+        path = "/tmp/recap_daily.png"
+        img.save(path)
+        send_mms_to_moderators(path, moderators)
     except Exception as e:
-        print(f"Group MMS send failed ({e}); falling back to per-recipient send")
-        for number in recipients:
-            try:
-                per = {
-                    "to": number,
-                    "body": "",
-                    "media_url": [image_url],
-                }
-                if MESSAGING_SERVICE_SID:
-                    per["messaging_service_sid"] = MESSAGING_SERVICE_SID
-                else:
-                    per["from_"] = TWILIO_NUMBER
-                msg = client.messages.create(**per)
-                print(f"Sent to {number}: {msg.sid}")
-            except Exception as e2:
-                print(f"Failed to send to {number}: {e2}")
+        print(f"send_daily_report failed: {e}")
 
-@app.route("/recap-image/<filename>")
-def serve_image(filename):
-    from flask import send_from_directory
-    return send_from_directory("recap_images", filename)
 
-def send_admin_sms(message):
-    if not ADMIN_NUMBER:
-        return
+def send_weekly_report(week_start=None, week_end=None):
     try:
-        client = Client(ACCOUNT_SID, AUTH_TOKEN)
-        kwargs = {"to": ADMIN_NUMBER, "body": message}
-        if MESSAGING_SERVICE_SID:
-            kwargs["messaging_service_sid"] = MESSAGING_SERVICE_SID
-        else:
-            kwargs["from_"] = TWILIO_NUMBER
-        client.messages.create(**kwargs)
+        members, moderators = load_people()
+        if not moderators:
+            print("No moderators configured; skipping weekly report")
+            return
+        if week_start is None or week_end is None:
+            today = now_eastern().date()
+            week_start = today - timedelta(days=today.weekday())
+            week_end = today
+        week_number = ((week_start - CHALLENGE_START).days // 7) + 1
+        logs = weekly_logs_for(members, week_start, week_end)
+        img = generate_weekly_recap(members, logs, week_number, week_start, week_end)
+        path = "/tmp/recap_weekly.png"
+        img.save(path)
+        send_mms_to_moderators(path, moderators)
     except Exception as e:
-        print(f"Failed admin SMS: {e}")
+        print(f"send_weekly_report failed: {e}")
 
 
-def handle_admin_correct(body):
-    parts = body.strip().split()
-    # ["admin", "correct", first_name, reps, optional_date]
+def scheduled_weekly_report():
+    """Monday 8:50 AM ET: recap the previous complete Mon-Sun week."""
+    today = now_eastern().date()
+    this_monday = today - timedelta(days=today.weekday())
+    send_weekly_report(this_monday - timedelta(days=7), this_monday - timedelta(days=1))
+
+
+# --------------------------------------------------------------------------
+# Admin correction (moderators only)
+# --------------------------------------------------------------------------
+def handle_admin_correct(body, members):
+    # Format: admin correct <firstname> <reps> [MMDD]
+    parts = body.split()
     if len(parts) < 4:
-        send_admin_sms("Usage: admin correct <first_name> <reps> [MMDD]")
         return
     first_name = parts[2].lower()
     try:
         reps = int(parts[3])
     except ValueError:
-        send_admin_sms(f"Invalid reps: {parts[3]}")
         return
 
-    tz = pytz.timezone(TIMEZONE)
-    target_date = datetime.now(tz).date()
+    target = None
+    for m in members:
+        if m["name"].split() and m["name"].split()[0].lower() == first_name:
+            target = m
+            break
+    if not target:
+        return
+
+    target_date = now_eastern().date()
     if len(parts) >= 5:
         d = parts[4]
         if len(d) != 4 or not d.isdigit():
-            send_admin_sms(f"Invalid date '{d}' (expected MMDD)")
             return
         try:
             target_date = date(target_date.year, int(d[:2]), int(d[2:]))
         except ValueError:
-            send_admin_sms(f"Invalid date '{d}'")
             return
 
-    people = load_people()
-    match_phone = None
-    match_name = None
-    for phone, p in people.items():
-        if p.get("name", "").split()[0].lower() == first_name:
-            match_phone = phone
-            match_name = p.get("name")
-            break
-    if not match_phone:
-        send_admin_sms(f"No person found with first name '{first_name}'")
-        return
-
-    target_date_str = target_date.strftime("%Y-%m-%d")
-    conn = get_db()
-    existing = conn.execute(
-        "SELECT id FROM logs WHERE phone=? AND date=?", (match_phone, target_date_str)
-    ).fetchone()
-    now_iso = datetime.now(pytz.timezone(TIMEZONE)).isoformat()
-    if existing:
-        conn.execute(
-            "UPDATE logs SET reps=?, logged_at=? WHERE id=?",
-            (reps, now_iso, existing["id"]),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO logs (phone, reps, logged_at, date) VALUES (?, ?, ?, ?)",
-            (match_phone, reps, now_iso, target_date_str),
-        )
-    conn.commit()
-    conn.close()
-    send_admin_sms(f"Updated {match_name} to {reps} reps for {target_date_str}")
+    upsert_log(target["phone"], target["name"], target_date, reps)
+    print(f"Admin correction: {target['name']} -> {reps} reps on {target_date}")
 
 
+# --------------------------------------------------------------------------
+# Webhook
+# --------------------------------------------------------------------------
 @app.route("/sms", methods=["POST"])
-def sms_reply():
-    from_number = request.form.get("From", "")
-    body = request.form.get("Body", "")
-    people = load_people()
+def sms():
+    from_number = normalize_phone(request.form.get("From", ""))
+    body = (request.form.get("Body", "") or "").strip()
+    members, moderators = load_people()
 
-    if ADMIN_NUMBER and from_number == ADMIN_NUMBER and body.strip().lower().startswith("admin correct"):
-        handle_admin_correct(body)
-        return "", 204
+    member_by_phone = {m["phone"]: m for m in members}
+    moderator_phones = {m["phone"] for m in moderators}
+    is_moderator = from_number in moderator_phones
+    text = body.lower()
 
-    if from_number not in people:
-        return "", 204
+    if is_moderator:
+        if text in ("send daily report", "display daily report"):
+            threading.Thread(target=send_daily_report, daemon=True).start()
+            return ("", 200)
+        if text in ("send weekly report", "display weekly report"):
+            threading.Thread(target=send_weekly_report, daemon=True).start()
+            return ("", 200)
+        if text.startswith("admin correct"):
+            handle_admin_correct(body, members)
+            return ("", 200)
 
-    test_type = is_test_command(body)
-    if test_type == "daily":
-        run_daily_recap(is_test=True)
-        return "", 204
-    if test_type == "weekly":
-        run_weekly_recap(is_test=True)
-        return "", 204
+    member = member_by_phone.get(from_number)
+    if member:
+        reps = extract_reps(body)
+        if reps is not None and reps > 0:
+            upsert_log(member["phone"], member["name"], now_eastern().date(), reps)
 
-    reps = parse_reps(body)
-    if reps is None:
-        return "", 204
-
-    if already_logged_today(from_number):
-        return "", 204
-
-    save_log(from_number, reps)
-    return "", 204
-
-def get_entries_for_date(target_date_str):
-    conn = get_db()
-    tz = pytz.timezone(TIMEZONE)
-    rows = conn.execute(
-        "SELECT phone, reps, logged_at FROM logs WHERE date=? ORDER BY reps DESC",
-        (target_date_str,)
-    ).fetchall()
-    conn.close()
-    entries = []
-    for row in rows:
-        logged_at = datetime.fromisoformat(row["logged_at"])
-        entries.append({
-            "phone": row["phone"],
-            "reps": row["reps"],
-            "time_str": logged_at.strftime("%-I:%M%p").lower()
-        })
-    return entries
-
-def people_list(people):
-    """Convert people dict to ordered list of {name, phone, photo} preserving insertion order."""
-    return [{"name": p.get("name", ""), "phone": phone, "photo": p.get("photo", "")}
-            for phone, p in people.items()]
+    # Every other message is silently ignored — no reply, ever.
+    return ("", 200)
 
 
-def run_daily_recap(is_test=False):
-    os.makedirs("recap_images", exist_ok=True)
-    people = load_people()
-    tz = pytz.timezone(TIMEZONE)
-    now = datetime.now(tz)
-
-    if is_test:
-        target_date = now.date()
-    else:
-        target_date = (now - timedelta(days=1)).date()
-    target_date_str = get_date_str(target_date)
-
-    entries = get_entries_for_date(target_date_str)
-
-    if not entries and not is_test:
-        return
-
-    day_num = (target_date - CHALLENGE_START).days + 1
-
-    plist = people_list(people)
-    daily_logs = {}
-    for entry in entries:
-        person = people.get(entry["phone"])
-        if person:
-            daily_logs[person["name"]] = entry["reps"]
-
-    img = generate_daily_recap(plist, daily_logs, target_date, day_num)
-    filename = f"daily_{target_date_str}{'_test' if is_test else ''}.png"
-    path = os.path.join("recap_images", filename)
-    img.save(path)
-    send_image_to_group(path)
-
-
-def run_weekly_recap(is_test=False):
-    os.makedirs("recap_images", exist_ok=True)
-    people = load_people()
-    tz = pytz.timezone(TIMEZONE)
-    now = datetime.now(tz)
-
-    week_end = now.date()
-    week_start = week_end - timedelta(days=6)
-    week_start_str = get_date_str(week_start)
-    week_end_str = get_date_str(week_end)
-
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT phone, reps, date FROM logs WHERE date >= ? AND date <= ?",
-        (week_start_str, week_end_str)
-    ).fetchall()
-    conn.close()
-
-    weekly_by_phone = {}
-    for phone in people:
-        weekly_by_phone[phone] = {"reps": 0, "days": 0, "points": 0}
-
-    for row in rows:
-        phone = row["phone"]
-        if phone not in weekly_by_phone:
-            continue
-        reps = row["reps"]
-        weekly_by_phone[phone]["reps"] += reps
-        weekly_by_phone[phone]["days"] += 1
-        weekly_by_phone[phone]["points"] += calculate_points(reps)
-
-    plist = people_list(people)
-    weekly_logs = {}
-    for phone, data in weekly_by_phone.items():
-        name = people[phone].get("name", "")
-        weekly_logs[name] = data
-
-    week_num = ((week_end - CHALLENGE_START).days // 7) + 1
-
-    img = generate_weekly_recap(plist, weekly_logs, week_num, week_start, week_end)
-    filename = f"weekly_{week_end_str}{'_test' if is_test else ''}.png"
-    path = os.path.join("recap_images", filename)
-    img.save(path)
-    send_image_to_group(path)
-
-scheduler = BackgroundScheduler(timezone=TIMEZONE)
-scheduler.add_job(run_daily_recap, "cron", hour=9, minute=0)
-scheduler.add_job(run_weekly_recap, "cron", day_of_week="mon", hour=9, minute=0)
-scheduler.start()
-
-os.makedirs("/data", exist_ok=True)
+# --------------------------------------------------------------------------
+# Startup
+# --------------------------------------------------------------------------
 init_db()
+
+scheduler = BackgroundScheduler(timezone=EASTERN)
+scheduler.add_job(scheduled_weekly_report, "cron", day_of_week="mon", hour=8, minute=50)
+scheduler.start()
 
 if __name__ == "__main__":
     app.run(debug=False, port=5000)
