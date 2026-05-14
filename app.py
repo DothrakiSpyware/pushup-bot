@@ -164,9 +164,11 @@ def weekly_logs_for(members, week_start, week_end):
         name = by_phone.get(normalize_phone(row["phone"]))
         if not name:
             continue
-        entry = logs.setdefault(name, {"reps": 0, "days": 0})
+        entry = logs.setdefault(name, {"reps": 0, "days": 0, "min_daily_reps": None})
         entry["reps"] += row["reps"]
         entry["days"] += 1
+        if entry["min_daily_reps"] is None or row["reps"] < entry["min_daily_reps"]:
+            entry["min_daily_reps"] = row["reps"]
     return logs
 
 
@@ -177,9 +179,47 @@ def now_eastern():
     return datetime.now(EASTERN)
 
 
-def extract_reps(body):
-    match = re.search(r"\d+", body)
-    return int(match.group()) if match else None
+REP_KEYWORDS = [
+    "pushups", "push-ups", "pushup", "push-up", "push",
+    "reps", "rep", "logging", "log", "knocked", "completed",
+    "finished", "done", "did", "do",
+]
+TIME_WORDS = [
+    "am", "pm", "o'clock", "tonight", "tomorrow",
+    "yesterday", "morning", "night",
+]
+_REP_KEYWORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(k) for k in REP_KEYWORDS) + r")\b", re.IGNORECASE
+)
+_TIME_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in TIME_WORDS) + r")\b", re.IGNORECASE
+)
+
+
+def parse_reps(body):
+    """Strict rep parser. Returns an int only when the message unambiguously
+    logs a rep count, otherwise None.
+    """
+    text = body.strip()
+
+    # Time-related words disqualify the message entirely.
+    if ":" in text or _TIME_WORD_RE.search(text):
+        return None
+
+    # Must contain exactly one number.
+    numbers = re.findall(r"\d+", text)
+    if len(numbers) != 1:
+        return None
+    reps = int(numbers[0])
+
+    # That number must be between 1 and 500 inclusive.
+    if not (1 <= reps <= 500):
+        return None
+
+    # Either the whole message is just the number, or it includes a rep keyword.
+    if re.fullmatch(r"\d+", text) or _REP_KEYWORD_RE.search(text):
+        return reps
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -241,7 +281,7 @@ def send_weekly_report(week_start=None, week_end=None, to_all_members=False):
 
 
 def scheduled_weekly_report():
-    """Monday 8:50 AM ET: recap the previous complete Mon-Sun week to all members."""
+    """Monday 9:00 AM ET: recap the previous complete Mon-Sun week to all members."""
     today = now_eastern().date()
     this_monday = today - timedelta(days=today.weekday())
     send_weekly_report(this_monday - timedelta(days=7), this_monday - timedelta(days=1),
@@ -311,8 +351,8 @@ def sms():
 
     member = member_by_phone.get(from_number)
     if member:
-        reps = extract_reps(body)
-        if reps is not None and reps > 0:
+        reps = parse_reps(body)
+        if reps is not None:
             upsert_log(member["phone"], member["name"], now_eastern().date(), reps)
 
     # Every other message is silently ignored — no reply, ever.
@@ -325,7 +365,7 @@ def sms():
 init_db()
 
 scheduler = BackgroundScheduler(timezone=EASTERN)
-scheduler.add_job(scheduled_weekly_report, "cron", day_of_week="mon", hour=8, minute=50)
+scheduler.add_job(scheduled_weekly_report, "cron", day_of_week="mon", hour=9, minute=0)
 scheduler.start()
 
 if __name__ == "__main__":

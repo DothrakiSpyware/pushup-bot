@@ -60,11 +60,27 @@ def _fonts():
                                 'hdr','hdr_m','pill','name','rep_sub','col','bar']}
 
 def calculate_points(reps):
-    if reps <= 0:   return 0
-    if reps <= 100: return int(reps)
-    if reps <= 150: return int(100 + (reps - 100) * 0.5)
-    if reps <= 200: return int(100 + 25 + (reps - 150) * 0.25)
-    return 150
+    if reps <= 0:
+        return 0
+    # Base score (unchanged), floored.
+    if reps <= 100:
+        base = int(reps)
+    elif reps <= 150:
+        base = int(100 + (reps - 100) * 0.5)
+    elif reps <= 200:
+        base = int(100 + 25 + (reps - 150) * 0.25)
+    else:
+        base = 150
+    # Tiered milestone bonus on top of the floored base (not stacked).
+    if reps >= 200:
+        bonus = 15
+    elif reps >= 150:
+        bonus = 10
+    elif reps >= 100:
+        bonus = 5
+    else:
+        bonus = 0
+    return base + bonus
 
 def _rank_color(rank):
     return [GOLD, SILVER, BRONZE][rank - 1] if rank <= 3 else DIM
@@ -134,7 +150,7 @@ def _draw_player_row(draw, f, ry, row_h, rank, orig_idx, first_name, initials,
     draw.rectangle([0, ry + row_h - 1, W, ry + row_h], fill=DIVIDER)
 
 def _draw_weekly_row(draw, f, ry, row_h, rank, orig_idx, first_name, initials,
-                     pts, reps, days, accent=ACC_BLUE):
+                     pts, reps, days, star=False, accent=ACC_BLUE):
     bg = ROW_A if rank % 2 == 1 else ROW_B
     draw.rectangle([0, ry, W, ry + row_h], fill=bg)
     if rank <= 3:
@@ -168,6 +184,11 @@ def _draw_weekly_row(draw, f, ry, row_h, rank, orig_idx, first_name, initials,
     draw.text((W - PADDING - ptw, ry + row_h//2 - 28), pts_str, font=f['pts'], fill=TEXT_PRI)
     ptlw = draw.textlength('pts', font=f['xs'])
     draw.text((W - PADDING - ptlw, ry + row_h//2 + 26), 'pts', font=f['xs'], fill=TEXT_SEC)
+    # consistency bonus star, to the left of the points value
+    if star:
+        star_w = draw.textlength('*', font=f['rank'])
+        draw.text((W - PADDING - ptw - star_w - 10, ry + row_h//2 - 30), '*',
+                  font=f['rank'], fill=GOLD)
     draw.rectangle([0, ry + row_h - 1, W, ry + row_h], fill=DIVIDER)
 
 def _draw_skipped(draw, f, y, skipped_list):
@@ -260,13 +281,20 @@ def generate_weekly_recap(people, weekly_logs, week_number, week_start, week_end
     SKIP_HDR_H = 36
     SKIP_ROW_H = 80
 
+    def has_consistency_bonus(name):
+        d = weekly_logs.get(name, {})
+        return d.get('days', 0) == 7 and (d.get('min_daily_reps') or 0) >= 100
+
     def wpts(name):
         d = weekly_logs.get(name, {})
         days = d.get('days', 0)
         reps = d.get('reps', 0)
         if days == 0: return 0
         avg = reps / days
-        return calculate_points(int(avg)) * days
+        pts = calculate_points(int(avg)) * days
+        if has_consistency_bonus(name):
+            pts += 50
+        return pts
 
     logged = []
     skipped = []
@@ -288,7 +316,7 @@ def generate_weekly_recap(people, weekly_logs, week_number, week_start, week_end
     d1 = week_start.strftime('%b %-d').upper()
     d2 = week_end.strftime('%b %-d').upper()
     date_line1 = f'{d1} – {d2}'
-    date_line2 = f'Week {week_number} of Challenge  •  Max possible: 1,050 pts'
+    date_line2 = f'Week {week_number} of Challenge  •  Max possible: 1,205 pts'
     badge = f'WEEK {week_number}'
     _draw_header(draw, f, HDR_BLUE, ACC_BLUE, 'WEEKLY RECAP', date_line1, date_line2, badge, total_h)
 
@@ -300,7 +328,8 @@ def generate_weekly_recap(people, weekly_logs, week_number, week_start, week_end
         pts = wpts(name)
         parts = name.split()
         _draw_weekly_row(draw, f, ry, ROW_H, rank, orig_idx,
-                         parts[0], _initials(name), int(pts), reps, days)
+                         parts[0], _initials(name), int(pts), reps, days,
+                         star=has_consistency_bonus(name))
 
     if skipped:
         sy = HDR_H + COL_H + len(logged) * ROW_H
@@ -332,12 +361,12 @@ if __name__ == '__main__':
         'Liam Torres': 60,
     }
     weekly_logs = {
-        'Vincent Andreozzi': {'reps': 980, 'days': 7},
-        'Jake Nic':          {'reps': 820, 'days': 6},
-        'Marcus Webb':       {'reps': 700, 'days': 7},
-        'Chris Donovan':     {'reps': 560, 'days': 5},
-        'Tyler Brooks':      {'reps': 430, 'days': 5},
-        'Liam Torres':       {'reps': 310, 'days': 4},
+        'Vincent Andreozzi': {'reps': 980, 'days': 7, 'min_daily_reps': 120},
+        'Jake Nic':          {'reps': 820, 'days': 6, 'min_daily_reps': 90},
+        'Marcus Webb':       {'reps': 700, 'days': 7, 'min_daily_reps': 70},
+        'Chris Donovan':     {'reps': 560, 'days': 5, 'min_daily_reps': 95},
+        'Tyler Brooks':      {'reps': 430, 'days': 5, 'min_daily_reps': 60},
+        'Liam Torres':       {'reps': 310, 'days': 4, 'min_daily_reps': 55},
     }
     d = generate_daily_recap(people, daily_logs, date(2026, 5, 14), 3)
     d.save('/tmp/preview_daily.png')
