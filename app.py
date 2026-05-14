@@ -119,7 +119,25 @@ def init_db():
 
 
 def upsert_log(phone, name, log_date, reps):
-    """One entry per person per day; texting again the same day overwrites."""
+    """One entry per person per day; logging again the same day accumulates."""
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO logs (phone, name, date, reps, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(phone, date) DO UPDATE SET
+            reps = logs.reps + excluded.reps,
+            name = excluded.name,
+            timestamp = excluded.timestamp
+        """,
+        (phone, name, log_date.isoformat(), reps, now_eastern().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_log(phone, name, log_date, reps):
+    """Set an exact rep count for a person/date (admin override, not additive)."""
     conn = get_db()
     conn.execute(
         """
@@ -320,7 +338,7 @@ def handle_admin_correct(body, members):
         except ValueError:
             return
 
-    upsert_log(target["phone"], target["name"], target_date, reps)
+    set_log(target["phone"], target["name"], target_date, reps)
     print(f"Admin correction: {target['name']} -> {reps} reps on {target_date}")
 
 
