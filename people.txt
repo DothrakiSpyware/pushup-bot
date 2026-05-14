@@ -6,8 +6,9 @@
 # Format: First Last | +1XXXXXXXXXX
 
 [MEMBERS]
-Your Name | +19143238594
+Vincent Andreozzi | +19143238594
+Jake Nic | +18454615954
 
 [MODERATORS]
-Your Name | +19143238594
-Other Mod | +18454615954
+Vincent Andreozzi | +19143238594
+Jake Nic | +18454615954
