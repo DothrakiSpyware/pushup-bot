@@ -221,7 +221,7 @@ def generate_daily_recap(people, daily_logs, target_date, day_number):
     logged.sort(key=lambda x: calculate_points(x[2]), reverse=True)
 
     skip_block = SKIP_HDR_H + len(skipped) * SKIP_ROW_H if skipped else 0
-    total_h = HDR_H + COL_H + len(logged) * ROW_H + skip_block + FOOTER_H
+    total_h = max(1400, HDR_H + COL_H + len(logged) * ROW_H + skip_block + FOOTER_H)
 
     img = Image.new('RGB', (W, total_h), BG)
     draw = ImageDraw.Draw(img)
@@ -280,7 +280,7 @@ def generate_weekly_recap(people, weekly_logs, week_number, week_start, week_end
     logged.sort(key=lambda x: wpts(x[1]), reverse=True)
 
     skip_block = SKIP_HDR_H + len(skipped) * SKIP_ROW_H if skipped else 0
-    total_h = HDR_H + COL_H + len(logged) * ROW_H + skip_block + FOOTER_H
+    total_h = max(1400, HDR_H + COL_H + len(logged) * ROW_H + skip_block + FOOTER_H)
 
     img = Image.new('RGB', (W, total_h), BG)
     draw = ImageDraw.Draw(img)
