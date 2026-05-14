@@ -219,11 +219,12 @@ def send_daily_report():
         print(f"send_daily_report failed: {e}")
 
 
-def send_weekly_report(week_start=None, week_end=None):
+def send_weekly_report(week_start=None, week_end=None, to_all_members=False):
     try:
         members, moderators = load_people()
-        if not moderators:
-            print("No moderators configured; skipping weekly report")
+        recipients = members if to_all_members else moderators
+        if not recipients:
+            print("No recipients configured; skipping weekly report")
             return
         if week_start is None or week_end is None:
             today = now_eastern().date()
@@ -234,16 +235,17 @@ def send_weekly_report(week_start=None, week_end=None):
         img = generate_weekly_recap(members, logs, week_number, week_start, week_end)
         path = "/tmp/recap_weekly.png"
         img.save(path)
-        send_mms_to_moderators(path, moderators)
+        send_mms_to_moderators(path, recipients)
     except Exception as e:
         print(f"send_weekly_report failed: {e}")
 
 
 def scheduled_weekly_report():
-    """Monday 8:50 AM ET: recap the previous complete Mon-Sun week."""
+    """Monday 8:50 AM ET: recap the previous complete Mon-Sun week to all members."""
     today = now_eastern().date()
     this_monday = today - timedelta(days=today.weekday())
-    send_weekly_report(this_monday - timedelta(days=7), this_monday - timedelta(days=1))
+    send_weekly_report(this_monday - timedelta(days=7), this_monday - timedelta(days=1),
+                       to_all_members=True)
 
 
 # --------------------------------------------------------------------------
