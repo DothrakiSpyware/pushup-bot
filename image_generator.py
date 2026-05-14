@@ -35,7 +35,8 @@ AVATAR_COLORS = [
 ]
 
 def _fonts():
-    base = '/usr/share/fonts/truetype/dejavu/DejaVuSans'
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    base = os.path.join(BASE_DIR, 'fonts', 'DejaVuSans')
     try:
         return {
             'bold':    ImageFont.truetype(f'{base}-Bold.ttf', 28),
