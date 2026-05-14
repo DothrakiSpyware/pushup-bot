@@ -209,7 +209,7 @@ def send_daily_report():
             print("No moderators configured; skipping daily report")
             return
         target_date = now_eastern().date()
-        day_number = (target_date - CHALLENGE_START).days + 1
+        day_number = (date.today() - date(2026, 5, 18)).days + 1
         logs = daily_logs_for(members, target_date)
         img = generate_daily_recap(members, logs, target_date, day_number)
         path = "/tmp/recap_daily.png"
