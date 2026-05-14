@@ -1,8 +1,7 @@
 flask
 twilio
 pillow
+cloudinary
 apscheduler
-requests
 gunicorn
 pytz
-cloudinary
