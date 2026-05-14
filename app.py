@@ -21,7 +21,7 @@ TWILIO_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL")
 
 EASTERN = pytz.timezone("America/New_York")
-CHALLENGE_START = date(2025, 5, 1)
+CHALLENGE_START = date(2026, 5, 18)
 
 DB_PATH = "/data/pushups.db"
 PEOPLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "people.txt")
