@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pushup Challenge Leaderboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #1a1a2e;
+    --accent: #00ff88;
+    --text: #ffffff;
+    --text-secondary: #8888aa;
+    --gold: #ffc400;
+    --silver: #c0c0c0;
+    --bronze: #b07038;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  .container {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px 16px 64px;
+  }
+  header {
+    text-align: center;
+    padding: 24px 8px 16px;
+  }
+  h1 {
+    font-size: clamp(28px, 7vw, 44px);
+    font-weight: 800;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+    text-shadow: 0 0 24px rgba(0, 255, 136, 0.25);
+  }
+  .subtitle {
+    margin-top: 10px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .day-number {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .live {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 0.15em;
+  }
+  .live-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.85); }
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin: 24px 0 16px;
+    background: var(--surface);
+    border-radius: 12px;
+    padding: 6px;
+  }
+  .tab {
+    flex: 1;
+    min-height: 44px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    padding: 12px 8px;
+    position: relative;
+    transition: color 0.2s ease;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); }
+  .tab.active::after {
+    content: '';
+    position: absolute;
+    left: 20%;
+    right: 20%;
+    bottom: 4px;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 2px;
+    box-shadow: 0 0 6px var(--accent);
+  }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .table-wrap {
+    background: var(--surface);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  }
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 380px;
+  }
+  th, td {
+    padding: 14px 12px;
+    text-align: left;
+    font-size: 14px;
+    white-space: nowrap;
+  }
+  th {
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: rgba(0, 0, 0, 0.2);
+  }
+  tbody tr {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    border-left: 3px solid transparent;
+    transition: background 0.2s ease;
+  }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+  tbody tr.rank-1 { border-left-color: var(--gold); }
+  tbody tr.rank-2 { border-left-color: var(--silver); }
+  tbody tr.rank-3 { border-left-color: var(--bronze); }
+  tbody tr.zero { opacity: 0.4; }
+  .col-rank {
+    width: 56px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .col-name {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .col-reps, .col-points, .col-days {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .col-points {
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .col-reps, .col-days { color: var(--text); }
+  .medal { font-size: 18px; }
+  .status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 4px 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+  .spinner {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 60px 20px;
+  }
+  .spinner-ring {
+    width: 32px;
+    height: 32px;
+    border: 3px solid rgba(0, 255, 136, 0.15);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  @media (max-width: 480px) {
+    th, td { padding: 12px 8px; font-size: 13px; }
+    .col-rank { width: 44px; }
+    th:first-child, td:first-child { padding-left: 12px; }
+    th:last-child, td:last-child { padding-right: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>PUSHUP CHALLENGE</h1>
+    <div class="subtitle">
+      <span id="current-date"></span> · <span class="day-number">Day <span id="day-number">—</span></span>
+    </div>
+    <div class="live"><span class="live-dot"></span><span>LIVE</span></div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="daily" role="tab">DAILY</button>
+    <button class="tab" data-tab="monthly" role="tab">MONTHLY</button>
+    <button class="tab" data-tab="alltime" role="tab">ALL TIME</button>
+  </div>
+
+  <div class="panel active" id="panel-daily">
+    <div class="table-wrap"><div id="content-daily" class="spinner"><div class="spinner-ring"></div></div></div>
+    <div class="status"><span id="updated-daily">&nbsp;</span></div>
+  </div>
+  <div class="panel" id="panel-monthly">
+    <div class="table-wrap"><div id="content-monthly" class="spinner"><div class="spinner-ring"></div></div></div>
+    <div class="status"><span id="updated-monthly">&nbsp;</span></div>
+  </div>
+  <div class="panel" id="panel-alltime">
+    <div class="table-wrap"><div id="content-alltime" class="spinner"><div class="spinner-ring"></div></div></div>
+    <div class="status"><span id="updated-alltime">&nbsp;</span></div>
+  </div>
+</div>
+
+<script>
+  const RAILWAY_URL = "REPLACE_WITH_YOUR_RAILWAY_URL";
+  const CHALLENGE_START = new Date(2026, 4, 12); // May 12, 2026 (local)
+  const REFRESH_MS = 60000;
+
+  const lastFetched = { daily: null, monthly: null, alltime: null };
+
+  function medalFor(rank) {
+    if (rank === 1) return '🥇';
+    if (rank === 2) return '🥈';
+    if (rank === 3) return '🥉';
+    return String(rank);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  function renderDaily(json) {
+    const rows = json.data || [];
+    const nonZero = rows.filter(r => r.reps > 0);
+    const zero = rows.filter(r => !(r.reps > 0));
+    nonZero.forEach((r, i) => r._rank = i + 1);
+
+    let html = `<div class="table-scroll"><table>
+      <thead><tr>
+        <th>Rank</th><th>Name</th><th class="col-reps">Reps</th><th class="col-points">Points</th>
+      </tr></thead><tbody>`;
+    for (const r of nonZero) {
+      const cls = r._rank <= 3 ? `rank-${r._rank}` : '';
+      html += `<tr class="${cls}">
+        <td class="col-rank"><span class="medal">${medalFor(r._rank)}</span></td>
+        <td class="col-name">${escapeHtml(r.name)}</td>
+        <td class="col-reps">${r.reps}</td>
+        <td class="col-points">${r.points}</td>
+      </tr>`;
+    }
+    for (const r of zero) {
+      html += `<tr class="zero">
+        <td class="col-rank">—</td>
+        <td class="col-name">${escapeHtml(r.name)}</td>
+        <td class="col-reps">—</td>
+        <td class="col-points">—</td>
+      </tr>`;
+    }
+    html += `</tbody></table></div>`;
+    return html;
+  }
+
+  function renderTotals(json) {
+    const rows = json.data || [];
+    const nonZero = rows.filter(r => r.total_reps > 0);
+    const zero = rows.filter(r => !(r.total_reps > 0));
+    nonZero.forEach((r, i) => r._rank = i + 1);
+
+    let html = `<div class="table-scroll"><table>
+      <thead><tr>
+        <th>Rank</th><th>Name</th><th class="col-reps">Reps</th><th class="col-points">Points</th><th class="col-days">Days</th>
+      </tr></thead><tbody>`;
+    for (const r of nonZero) {
+      const cls = r._rank <= 3 ? `rank-${r._rank}` : '';
+      html += `<tr class="${cls}">
+        <td class="col-rank"><span class="medal">${medalFor(r._rank)}</span></td>
+        <td class="col-name">${escapeHtml(r.name)}</td>
+        <td class="col-reps">${r.total_reps}</td>
+        <td class="col-points">${r.total_points}</td>
+        <td class="col-days">${r.days_logged}</td>
+      </tr>`;
+    }
+    for (const r of zero) {
+      html += `<tr class="zero">
+        <td class="col-rank">—</td>
+        <td class="col-name">${escapeHtml(r.name)}</td>
+        <td class="col-reps">—</td>
+        <td class="col-points">—</td>
+        <td class="col-days">0</td>
+      </tr>`;
+    }
+    html += `</tbody></table></div>`;
+    return html;
+  }
+
+  function errorHtml() {
+    return `<div class="error">Could not load data — Railway may be waking up, refresh in a moment.</div>`;
+  }
+
+  async function fetchTab(tab, renderer) {
+    try {
+      const res = await fetch(`${RAILWAY_URL}/api/${tab}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error('bad status');
+      const json = await res.json();
+      document.getElementById(`content-${tab}`).outerHTML =
+        `<div id="content-${tab}">${renderer(json)}</div>`;
+      lastFetched[tab] = Date.now();
+      if (tab === 'daily' && json.day_number) {
+        document.getElementById('day-number').textContent = json.day_number;
+      }
+    } catch (e) {
+      const el = document.getElementById(`content-${tab}`);
+      el.outerHTML = `<div id="content-${tab}">${errorHtml()}</div>`;
+      lastFetched[tab] = null;
+    }
+  }
+
+  function refreshAll() {
+    fetchTab('daily', renderDaily);
+    fetchTab('monthly', renderTotals);
+    fetchTab('alltime', renderTotals);
+  }
+
+  function updateTimestamps() {
+    for (const tab of ['daily', 'monthly', 'alltime']) {
+      const el = document.getElementById(`updated-${tab}`);
+      if (!lastFetched[tab]) { el.textContent = ''; continue; }
+      const secs = Math.floor((Date.now() - lastFetched[tab]) / 1000);
+      el.textContent = `Last updated: ${secs}s ago`;
+    }
+  }
+
+  function updateHeader() {
+    const now = new Date();
+    document.getElementById('current-date').textContent =
+      now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    const dayNum = Math.floor((now - CHALLENGE_START) / 86400000) + 1;
+    if (dayNum > 0) document.getElementById('day-number').textContent = dayNum;
+  }
+
+  document.querySelectorAll('.tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b === btn));
+      document.querySelectorAll('.panel').forEach(p =>
+        p.classList.toggle('active', p.id === `panel-${tab}`));
+    });
+  });
+
+  updateHeader();
+  refreshAll();
+  setInterval(refreshAll, REFRESH_MS);
+  setInterval(updateTimestamps, 1000);
+</script>
+</body>
+</html>
